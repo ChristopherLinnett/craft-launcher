@@ -1553,22 +1553,20 @@ fn automatic_checks_run_every_five_minutes() {
     assert_eq!(CheckEvery::Never.seconds(), None);
 }
 
-#[test]
-/// With auto-update on, outdated apps are queued for Install and the launcher for
-/// `UpdateLauncher`.
-fn automatic_updates_queue_installs_for_outdated_apps_and_launcher() {
+/// What a launcher sends in its first frames, with automatic updates `auto_update`, when apps and
+/// the launcher itself are outdated; `wrap` puts a backend around the fake one.
+fn commands_at_start(auto_update: bool, wrap: impl FnOnce(Fake) -> Box<dyn Backend>) -> Vec<Command> {
     let mut ev = events();
     ev.push(Event::LauncherUpdate(release("artcraft-launcher", "0.2.0", NOW)));
     let sent = Rc::new(RefCell::new(Vec::new()));
-    let sent2 = sent.clone();
-    let mut backend =
-        Some(Fake { events: ev, sent: sent2, manage: true, pictures: Rc::default(), asked: Vec::new(), clock: Rc::new(Cell::new(NOW)) });
+    let fake = Fake { events: ev, sent: sent.clone(), manage: true, pictures: Rc::default(), asked: Vec::new(), clock: Rc::new(Cell::new(NOW)) };
+    let mut backend = Some(wrap(fake));
     let mut h = test_harness_builder(egui::Theme::Dark).with_size(egui::vec2(1180.0, 1200.0)).build_ui_state(
         move |ui, state: &mut Option<LauncherUi>| {
             if state.is_none()
                 && let Some(b) = backend.take()
             {
-                *state = Some(LauncherUi::new(ui.ctx(), Box::new(b), Settings { auto_update: true, notify: false, ..Settings::default() }));
+                *state = Some(LauncherUi::new(ui.ctx(), b, Settings { auto_update, notify: false, ..Settings::default() }));
             }
             if let Some(l) = state.as_mut() {
                 l.logic(&ui.ctx().clone(), &mut NoHost);
@@ -1578,7 +1576,14 @@ fn automatic_updates_queue_installs_for_outdated_apps_and_launcher() {
         None,
     );
     h.run_steps(4);
-    let commands = sent.borrow().clone();
+    sent.borrow().clone()
+}
+
+#[test]
+/// With auto-update on, outdated apps are queued for Install and the launcher for
+/// `UpdateLauncher`.
+fn automatic_updates_queue_installs_for_outdated_apps_and_launcher() {
+    let commands = commands_at_start(true, |fake| Box::new(fake));
     assert!(commands.contains(&Command::Install { app: "photocraft".into() }), "outdated photocraft should be queued for install: {commands:?}");
     assert!(commands.contains(&Command::Install { app: "effectcraft".into() }), "outdated effectcraft should be queued for install: {commands:?}");
     assert!(commands.contains(&Command::UpdateLauncher), "launcher update should be queued: {commands:?}");
@@ -1587,30 +1592,38 @@ fn automatic_updates_queue_installs_for_outdated_apps_and_launcher() {
 #[test]
 /// With auto-update off, no app install or launcher update is queued.
 fn automatic_updates_are_disabled_by_default() {
-    let mut ev = events();
-    ev.push(Event::LauncherUpdate(release("artcraft-launcher", "0.2.0", NOW)));
-    let sent = Rc::new(RefCell::new(Vec::new()));
-    let sent2 = sent.clone();
-    let mut backend =
-        Some(Fake { events: ev, sent: sent2, manage: true, pictures: Rc::default(), asked: Vec::new(), clock: Rc::new(Cell::new(NOW)) });
-    let mut h = test_harness_builder(egui::Theme::Dark).with_size(egui::vec2(1180.0, 1200.0)).build_ui_state(
-        move |ui, state: &mut Option<LauncherUi>| {
-            if state.is_none()
-                && let Some(b) = backend.take()
-            {
-                *state = Some(LauncherUi::new(ui.ctx(), Box::new(b), Settings { auto_update: false, notify: false, ..Settings::default() }));
-            }
-            if let Some(l) = state.as_mut() {
-                l.logic(&ui.ctx().clone(), &mut NoHost);
-                l.ui(ui, &mut NoHost);
-            }
-        },
-        None,
-    );
-    h.run_steps(4);
-    let commands = sent.borrow().clone();
+    let commands = commands_at_start(false, |fake| Box::new(fake));
     assert!(!commands.contains(&Command::Install { app: "photocraft".into() }), "photocraft should not be auto-installed when auto_update is false");
     assert!(!commands.contains(&Command::UpdateLauncher), "launcher should not be auto-updated when auto_update is false");
+}
+
+#[test]
+/// Where installs are shared (a hosted launcher's server), the setting can't start one: one
+/// visitor's settings must not update everyone's apps.
+fn shared_installs_are_never_updated_automatically() {
+    struct Shared(Fake);
+    impl Backend for Shared {
+        fn send(&mut self, c: Command) {
+            self.0.send(c);
+        }
+        fn poll(&mut self) -> Vec<Event> {
+            self.0.poll()
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.0.capabilities()
+        }
+        fn platform(&self) -> Option<Platform> {
+            self.0.platform()
+        }
+        fn now(&self) -> i64 {
+            self.0.now()
+        }
+        fn unattended_installs(&self) -> bool {
+            false
+        }
+    }
+    let commands = commands_at_start(true, |fake| Box::new(Shared(fake)));
+    assert!(!commands.iter().any(|c| matches!(c, Command::Install { .. } | Command::UpdateLauncher)), "{commands:?}");
 }
 
 #[test]

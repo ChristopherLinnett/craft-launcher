@@ -1015,7 +1015,7 @@ impl LauncherUi {
             self.launch_app(id);
             ui.close();
         }
-        if ui.button(t(reveal)).clicked() {
+        if !reveal.is_empty() && ui.button(t(reveal)).clicked() {
             self.act_command(Command::Reveal { app: id.to_string() });
             ui.close();
         }

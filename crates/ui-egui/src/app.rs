@@ -67,6 +67,10 @@ pub trait Host {
     }
     /// Quit the launcher for real (not just hide to the tray).
     fn quit(&mut self) {}
+    /// Whether [`Self::quit`] does anything: a browser tab can't close itself.
+    fn can_quit(&self) -> bool {
+        true
+    }
 }
 
 pub(crate) struct Toast {
@@ -672,9 +676,14 @@ impl LauncherUi {
         );
     }
 
+    /// Whether automatic updates apply here: the backend installs apps, and may do so unclicked.
+    pub(crate) fn offers_auto_update(&self) -> bool {
+        self.caps.manage_apps && self.backend.unattended_installs()
+    }
+
     /// When auto-updates are enabled, automatically downloads and installs pending updates.
     pub(crate) fn trigger_auto_updates(&mut self) {
-        if !self.caps.manage_apps || !self.settings.auto_update {
+        if !self.offers_auto_update() || !self.settings.auto_update {
             return;
         }
         let to_update: Vec<(String, String)> = self

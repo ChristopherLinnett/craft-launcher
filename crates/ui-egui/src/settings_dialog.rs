@@ -60,7 +60,8 @@ impl LauncherUi {
 
         let quit_width = widgets::button_width(ui, tl!("Quit ArtCraft Launcher"), 0.0);
         let done_width = widgets::button_width(ui, tl!("Done"), 90.0);
-        let stack_actions = self.caps.manage_apps && quit_width + done_width + ui.spacing().item_spacing.x + 48.0 > size.x;
+        let offers_quit = self.caps.manage_apps && host.can_quit();
+        let stack_actions = offers_quit && quit_width + done_width + ui.spacing().item_spacing.x + 48.0 > size.x;
         let footer_h = if stack_actions { 2.0 * theme::CONTROL_H + ui.spacing().item_spacing.y } else { theme::CONTROL_H } + 32.0;
         let body_h = (size.y - hero_h - footer_h - 2.0).max(0.0);
 
@@ -80,7 +81,7 @@ impl LauncherUi {
         egui::Frame::new().inner_margin(egui::Margin::symmetric(theme::PAD as i8, 16)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             let quit = |ui: &mut Ui, host: &mut dyn Host| {
-                if self.caps.manage_apps && widgets::button(ui, tl!("Quit ArtCraft Launcher"), Kind::Secondary, 0.0).clicked() {
+                if offers_quit && widgets::button(ui, tl!("Quit ArtCraft Launcher"), Kind::Secondary, 0.0).clicked() {
                     host.quit();
                 }
             };
@@ -184,7 +185,7 @@ impl LauncherUi {
                     .labelled_by(label);
             });
             self.settings.check_every = every;
-            if self.caps.manage_apps
+            if self.offers_auto_update()
                 && ui.checkbox(&mut self.settings.auto_update, tl!("Automatically download and install updates")).changed()
                 && self.settings.auto_update
             {
