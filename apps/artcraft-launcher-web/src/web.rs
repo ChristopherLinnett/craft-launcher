@@ -1,5 +1,7 @@
 //! The browser backend and entry point.
 
+mod hosted;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -66,6 +68,8 @@ pub fn start() {
             log::error!("no canvas");
             return;
         };
+        // Served by a hosted launcher? Then the server installs the apps (one quick same-origin request).
+        let host = hosted::probe().await;
         let result = eframe::WebRunner::new()
             .start(
                 canvas,
@@ -73,8 +77,12 @@ pub fn start() {
                 Box::new(|cc| {
                     let ctx = cc.egui_ctx.clone();
                     let settings: Settings = cc.storage.and_then(|s| eframe::get_value(s, SETTINGS_KEY)).unwrap_or_default();
-                    let backend = WebBackend::new(ctx.clone());
-                    Ok(Box::new(WebApp { ui: LauncherUi::new(&ctx, Box::new(backend), settings) }))
+                    let web = WebBackend::new(ctx.clone());
+                    let backend: Box<dyn Backend> = match host {
+                        Some(state) => Box::new(hosted::HostedBackend::new(web, state)),
+                        None => Box::new(web),
+                    };
+                    Ok(Box::new(WebApp { ui: LauncherUi::new(&ctx, backend, settings) }))
                 }),
             )
             .await;
@@ -93,6 +101,10 @@ struct WebHost;
 impl Host for WebHost {
     fn reduce_motion(&self) -> bool {
         web_sys::window().and_then(|w| w.match_media("(prefers-reduced-motion: reduce)").ok().flatten()).is_some_and(|query| query.matches())
+    }
+
+    fn can_quit(&self) -> bool {
+        false
     }
 }
 
@@ -199,6 +211,30 @@ impl WebBackend {
     }
 }
 
+/// Sends `init` to `url` (with `headers`) and waits for the answer. The error says why there is
+/// none: no window, a request the browser refused to build, or no connection.
+async fn fetch(url: &str, init: &web_sys::RequestInit, headers: &[(&str, &str)]) -> Result<web_sys::Response, &'static str> {
+    let window = web_sys::window().ok_or("no window")?;
+    let request = web_sys::Request::new_with_str_and_init(url, init).map_err(|_| "bad request")?;
+    for (name, value) in headers {
+        let _ = request.headers().set(name, value);
+    }
+    JsFuture::from(window.fetch_with_request(&request)).await.map_err(|_| "no connection")?.dyn_into().map_err(|_| "no answer")
+}
+
+/// A `GET` that may cross origins (GitHub's API, its asset CDN).
+fn cors_get() -> web_sys::RequestInit {
+    let init = web_sys::RequestInit::new();
+    init.set_method("GET");
+    init.set_mode(web_sys::RequestMode::Cors);
+    init
+}
+
+/// A response's body as text.
+async fn body_text(resp: &web_sys::Response) -> Option<String> {
+    JsFuture::from(resp.text().ok()?).await.ok()?.as_string()
+}
+
 /// Why a picture couldn't be had.
 enum PictureError {
     /// This picture only: it isn't published, or what came back isn't a picture.
@@ -211,16 +247,7 @@ enum PictureError {
 /// on what arrived; the bytes must start like a JPEG.
 async fn picture(url: &str) -> Result<Vec<u8>, PictureError> {
     let offline = |what: &str| PictureError::Network(format!("couldn't load a picture ({what})"));
-    let window = web_sys::window().ok_or_else(|| offline("no window"))?;
-    let init = web_sys::RequestInit::new();
-    init.set_method("GET");
-    init.set_mode(web_sys::RequestMode::Cors);
-    let request = web_sys::Request::new_with_str_and_init(url, &init).map_err(|_| offline("bad request"))?;
-    let resp: web_sys::Response = JsFuture::from(window.fetch_with_request(&request))
-        .await
-        .map_err(|_| offline("no connection"))?
-        .dyn_into()
-        .map_err(|_| offline("no answer"))?;
+    let resp = fetch(url, &cors_get(), &[]).await.map_err(offline)?;
     match resp.status() {
         200 => {}
         404 => return Err(PictureError::Picture("this picture isn't published".into())),
@@ -249,13 +276,7 @@ async fn latest(repo: &str, prereleases: bool) -> Result<LatestRelease, Option<i
     } else {
         format!("https://api.github.com/repos/{repo}/releases/latest")
     };
-    let window = web_sys::window().ok_or(None)?;
-    let init = web_sys::RequestInit::new();
-    init.set_method("GET");
-    init.set_mode(web_sys::RequestMode::Cors);
-    let request = web_sys::Request::new_with_str_and_init(&url, &init).map_err(|_| None)?;
-    let _ = request.headers().set("Accept", "application/vnd.github+json");
-    let resp: web_sys::Response = JsFuture::from(window.fetch_with_request(&request)).await.map_err(|_| None)?.dyn_into().map_err(|_| None)?;
+    let resp = fetch(&url, &cors_get(), &[("Accept", "application/vnd.github+json")]).await.map_err(|_| None)?;
     match resp.status() {
         200 => {}
         404 => return Ok(LatestRelease::None),
@@ -265,7 +286,7 @@ async fn latest(repo: &str, prereleases: bool) -> Result<LatestRelease, Option<i
         }
         _ => return Err(None),
     }
-    let text = JsFuture::from(resp.text().map_err(|_| None)?).await.map_err(|_| None)?.as_string().ok_or(None)?;
+    let text = body_text(&resp).await.ok_or(None)?;
     let found: Option<Release> = if prereleases {
         release::parse_github_release_list(&text, repo, true).map_err(|_| None)?
     } else {

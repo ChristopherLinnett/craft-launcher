@@ -1,0 +1,32 @@
+[package]
+name = "artcraft-launcher-host"
+description = "ArtCraft Launcher's hosted mode: serves the launcher and the Craft Apps' browser builds from one address, behind a team password, and installs and updates them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "artcraft-launcher-host"
+path = "src/main.rs"
+
+[dependencies]
+artcraft-launcher-core = { workspace = true }
+artcraft-launcher-native = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+tiny_http = "0.12"
+argon2 = "0.5"
+hmac = "0.12"
+sha2 = "0.10"
+getrandom = "0.3"
+flate2 = "1"
+
+[dev-dependencies]
+artcraft-launcher-native = { workspace = true, features = ["test-support"] }
+tempfile = "3"
