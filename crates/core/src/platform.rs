@@ -16,6 +16,8 @@ pub enum Os {
     MacOs,
     Linux,
     FreeBsd,
+    /// A web browser: where a hosted launcher runs the Craft Apps' browser builds.
+    Web,
 }
 
 impl Os {
@@ -25,6 +27,7 @@ impl Os {
             Self::MacOs => "macOS",
             Self::Linux => "Linux",
             Self::FreeBsd => "FreeBSD",
+            Self::Web => "Web",
         }
     }
 }
@@ -35,6 +38,8 @@ pub enum Arch {
     X86,
     Arm64,
     Riscv64,
+    /// WebAssembly: the browser builds' only architecture.
+    Wasm32,
 }
 
 impl Arch {
@@ -44,6 +49,7 @@ impl Arch {
             Self::X86 => "x86",
             Self::Arm64 => "ARM64",
             Self::Riscv64 => "RISC-V",
+            Self::Wasm32 => "WebAssembly",
         }
     }
 }
@@ -65,6 +71,9 @@ pub enum PackageKind {
     Flatpak,
     /// Linux or FreeBSD tarball (`bin/<app>`, `share/…`).
     TarGz,
+    /// A browser build: a static site in `<app>-web-<version>.zip`, which a hosted launcher
+    /// serves from its own address.
+    Web,
 }
 
 impl PackageKind {
@@ -79,6 +88,7 @@ impl PackageKind {
             Self::ArchPkg => "Arch package (.pkg.tar.zst)",
             Self::Flatpak => "Flatpak bundle",
             Self::TarGz => "Tarball (.tar.gz)",
+            Self::Web => "Web app (.zip)",
         }
     }
 
@@ -93,6 +103,7 @@ impl PackageKind {
             Self::ArchPkg => ".pkg.tar.zst",
             Self::Flatpak => ".flatpak",
             Self::TarGz => ".tar.gz",
+            Self::Web => ".zip",
         }
     }
 }
@@ -104,7 +115,13 @@ pub struct Platform {
     pub arch: Arch,
 }
 
+/// The platform token of a browser build's file name (`photocraft-web-0.16.0.zip`).
+const WEB_TOKEN: &str = "web";
+
 impl Platform {
+    /// The browser builds, as a hosted launcher installs and serves them.
+    pub const WEB: Platform = Platform { os: Os::Web, arch: Arch::Wasm32 };
+
     /// The platform this binary was built for, or `None` for wasm and unsupported targets.
     pub fn current() -> Option<Self> {
         let os = if cfg!(target_os = "windows") {
@@ -135,6 +152,7 @@ impl Platform {
     pub fn label(self) -> String {
         match self.os {
             Os::MacOs => "macOS".into(),
+            Os::Web => Os::Web.label().into(),
             os => format!("{} {}", os.label(), self.arch.label()),
         }
     }
@@ -154,10 +172,12 @@ impl Platform {
             (Os::Linux, Arch::X64) => &["linux-x86_64"],
             (Os::Linux, Arch::Arm64) => &["linux-aarch64"],
             (Os::Linux, Arch::Riscv64) => &["linux-riscv64"],
-            (Os::Linux, Arch::X86) => &[],
+            (Os::Linux, Arch::X86 | Arch::Wasm32) => &[],
             (Os::FreeBsd, Arch::X64) => &["freebsd-x86_64"],
             (Os::FreeBsd, Arch::Arm64) => &["freebsd-aarch64"],
             (Os::FreeBsd, _) => &[],
+            (Os::Web, Arch::Wasm32) => &[WEB_TOKEN],
+            (Os::Web, _) => &[],
         }
     }
 
@@ -168,6 +188,7 @@ impl Platform {
             Os::MacOs => &[PackageKind::Dmg],
             Os::Linux => &[PackageKind::AppImage, PackageKind::TarGz],
             Os::FreeBsd => &[PackageKind::TarGz],
+            Os::Web => &[PackageKind::Web],
         }
     }
 
@@ -178,6 +199,7 @@ impl Platform {
             Os::MacOs => &[PackageKind::Dmg],
             Os::Linux => &[PackageKind::AppImage, PackageKind::Deb, PackageKind::Rpm, PackageKind::ArchPkg, PackageKind::Flatpak, PackageKind::TarGz],
             Os::FreeBsd => &[PackageKind::TarGz],
+            Os::Web => &[PackageKind::Web],
         }
     }
 }
@@ -191,9 +213,12 @@ pub struct AssetName {
     pub kind: PackageKind,
 }
 
-/// Reads `<stem>-<version>-<os>-<arch>[-portable].<ext>`; `None` for checksums, zsync files, CLI
-/// and web bundles, or anything else.
+/// Reads `<stem>-<version>-<os>-<arch>[-portable].<ext>`, or a browser build's
+/// `<stem>-web-<version>.zip`; `None` for checksums, zsync files, CLI bundles, or anything else.
 pub fn parse_asset_name(name: &str, stems: &[&str]) -> Option<AssetName> {
+    if let Some(web) = parse_web_asset_name(name, stems) {
+        return Some(web);
+    }
     const KINDS: [PackageKind; 9] = [
         PackageKind::PortableZip,
         PackageKind::TarGz,
@@ -217,6 +242,20 @@ pub fn parse_asset_name(name: &str, stems: &[&str]) -> Option<AssetName> {
         return Some(AssetName { stem: (*stem).to_string(), version: version.to_string(), token: format!("{os}-{arch}"), kind });
     }
     None
+}
+
+/// Reads `<stem>-web-<version>.zip`, a browser build.
+fn parse_web_asset_name(name: &str, stems: &[&str]) -> Option<AssetName> {
+    let base = name.strip_suffix(PackageKind::Web.suffix())?;
+    stems.iter().find_map(|stem| {
+        let version = base.strip_prefix(stem)?.strip_prefix('-')?.strip_prefix(WEB_TOKEN)?.strip_prefix('-')?;
+        (version.starts_with(|c: char| c.is_ascii_digit()) && crate::version::parse(version).is_some()).then(|| AssetName {
+            stem: (*stem).to_string(),
+            version: version.to_string(),
+            token: WEB_TOKEN.to_string(),
+            kind: PackageKind::Web,
+        })
+    })
 }
 
 /// The best asset of `release` for `platform`, trying `kinds` in order and, within a kind, the
@@ -333,14 +372,42 @@ mod tests {
         assert_eq!((n.version.as_str(), n.token.as_str(), n.kind), ("0.2.0-rc.1", "windows-arm64", PackageKind::PortableZip));
         let n = parse_asset_name("printcraft-0.2.1-linux-x86_64.tar.gz", &["pdfcraft", "printcraft"]).unwrap();
         assert_eq!((n.stem.as_str(), n.kind), ("printcraft", PackageKind::TarGz));
-        for other in
-            ["photocraft-cli-0.5.0-macos-universal.zip", "photocraft-web-0.5.0.zip", "SHA256SUMS.txt", "photocraft-0.5.0-linux-x86_64.AppImage.zsync"]
-        {
+        let n = parse_asset_name("photocraft-web-0.5.0.zip", &["photocraft"]).unwrap();
+        assert_eq!((n.version.as_str(), n.token.as_str(), n.kind), ("0.5.0", "web", PackageKind::Web));
+        let n = parse_asset_name("artcraft-launcher-web-0.8.1-rc.2.zip", &["artcraft-launcher"]).unwrap();
+        assert_eq!((n.stem.as_str(), n.version.as_str(), n.kind), ("artcraft-launcher", "0.8.1-rc.2", PackageKind::Web));
+        for other in [
+            "photocraft-cli-0.5.0-macos-universal.zip",
+            "photocraft-web-latest.zip",
+            "photocraft-web-.zip",
+            "photocraftweb-0.5.0.zip",
+            "SHA256SUMS.txt",
+            "photocraft-0.5.0-linux-x86_64.AppImage.zsync",
+        ] {
             assert_eq!(parse_asset_name(other, &["photocraft"]), None, "{other}");
         }
         // FigCraft also ships its collaboration server; that tarball is not the app.
         assert_eq!(parse_asset_name("figcraft-server-0.5.1-linux-x86_64.tar.gz", &["figcraft"]), None);
         assert!(parse_asset_name("figcraft-0.5.1-linux-x86_64.tar.gz", &["figcraft"]).is_some());
+    }
+
+    #[test]
+    fn the_web_platform_takes_the_browser_build_and_nothing_else() {
+        let r = release(PHOTO);
+        let web = Platform::WEB;
+        let (asset, kind) = pick_asset(&r, &["photocraft"], web, web.default_kinds()).unwrap();
+        assert_eq!((asset.name.as_str(), kind), ("photocraft-web-0.5.0.zip", PackageKind::Web));
+        assert_eq!(web.download_kinds(), web.default_kinds());
+        // A desktop install never takes the browser build, even when asked for that format.
+        for os in [Os::Windows, Os::MacOs, Os::Linux, Os::FreeBsd] {
+            for arch in [Arch::X64, Arch::X86, Arch::Arm64, Arch::Riscv64, Arch::Wasm32] {
+                assert_eq!(pick_asset(&r, &["photocraft"], Platform { os, arch }, &[PackageKind::Web]), None, "{os:?} {arch:?}");
+            }
+        }
+        // ...and the browser never takes a desktop package.
+        let desktop_only = release(&PHOTO[..PHOTO.len() - 2]);
+        assert_eq!(pick_asset(&desktop_only, &["photocraft"], web, &[PackageKind::Web, PackageKind::TarGz, PackageKind::PortableZip]), None);
+        assert_eq!(web.label(), "Web");
     }
 
     #[test]

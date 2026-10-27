@@ -26,6 +26,7 @@ pub mod screenshots;
 pub mod self_update;
 pub mod single_instance;
 pub mod source;
+pub mod zip_archive;
 
 pub use backend::NativeBackend;
 

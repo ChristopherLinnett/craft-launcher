@@ -369,16 +369,31 @@ pub fn available_kinds() -> Vec<PackageKind> {
     Vec::new()
 }
 
-/// Fetches `asset` into the download folder, checked against its published SHA-256: the feed's
-/// or GitHub's per-file digest, else the release's `SHA256SUMS.txt`. A release with neither is
-/// refused before anything is fetched: a file nothing vouches for is never installed (#90).
+/// Fetches `asset` into the download folder; see [`download_verified`].
 pub(crate) fn download(release: &Release, asset: &Asset, job: &mut Job<'_>) -> Result<PathBuf, String> {
+    let dest = download_path(job.paths, asset);
+    download_verified(job.http, release, asset, &dest, job.stop, &mut *job.phase)?;
+    Ok(dest)
+}
+
+/// Fetches `asset` of `release` to `dest`, checked against its published SHA-256: the feed's or
+/// GitHub's per-file digest, else the release's `SHA256SUMS.txt`. A release with neither is
+/// refused before anything is fetched: a file nothing vouches for is never installed (#90).
+/// Resumes a partial download left at `dest` (see [`Http::download`]).
+pub fn download_verified(
+    http: &Http,
+    release: &Release,
+    asset: &Asset,
+    dest: &Path,
+    stop: &Stop,
+    phase: &mut dyn FnMut(JobPhase),
+) -> Result<(), String> {
     if !release::valid_file_name(&asset.name) {
         return Err("the release has an unexpected file name".into());
     }
     let sha = match &asset.sha256 {
         Some(s) => Some(s.clone()),
-        None => published_checksum(release, asset, job.http)?,
+        None => published_checksum(release, asset, http)?,
     };
     let Some(sha) = sha else {
         return Err(format!(
@@ -386,14 +401,12 @@ pub(crate) fn download(release: &Release, asset: &Asset, job: &mut Job<'_>) -> R
             asset.name
         ));
     };
-    let dest = download_path(job.paths, asset);
-    let phase = &mut *job.phase;
-    job.http.download(&asset.url, &dest, asset.size, &sha, job.stop, &mut |t| match t {
+    http.download(&asset.url, dest, asset.size, &sha, stop, &mut |t| match t {
         Transfer::Bytes { done, total } => phase(JobPhase::Downloading { done, total }),
         Transfer::Reconnecting { done, total } => phase(JobPhase::Reconnecting { done, total }),
     })?;
-    (job.phase)(JobPhase::Verifying);
-    Ok(dest)
+    phase(JobPhase::Verifying);
+    Ok(())
 }
 
 /// The file's line in the release's `SHA256SUMS.txt`. `Ok(None)` only when the release really

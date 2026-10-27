@@ -5,10 +5,11 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::manifest::Record;
 use crate::paths::Paths;
+use crate::zip_archive::extract;
 use artcraft_launcher_core::{CraftApp, PackageKind};
 
-const MAX_FILES: usize = 10_000;
-const MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// What [`extract`]'s errors call these archives.
+const WHAT: &str = "portable ZIP";
 
 /// Custom destinations may have OS-managed links in their host ancestors.
 pub fn validate_directory(path: &Path) -> Result<(), String> {
@@ -119,51 +120,6 @@ impl Drop for Staging {
     }
 }
 
-fn extract(file: &Path, destination: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
-    let file = std::fs::File::open(file).map_err(|e| e.to_string())?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("couldn't read the portable ZIP ({e})"))?;
-    if archive.len() > MAX_FILES {
-        return Err("The portable ZIP contains too many files.".into());
-    }
-    let mut files = Vec::new();
-    let mut entries = Vec::new();
-    let mut total = 0u64;
-    let mut seen = std::collections::BTreeSet::new();
-    for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
-        let relative = entry.enclosed_name().ok_or("The portable ZIP contains an unsafe path.")?;
-        if relative.components().any(|c| !matches!(c, Component::Normal(_)))
-            || entry.name().contains(['\\', ':'])
-            || entry.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000)
-        {
-            return Err("The portable ZIP contains an unsafe path or link.".into());
-        }
-        // Windows treats case variants as the same file; reject duplicate and colliding names.
-        if !seen.insert(relative.to_string_lossy().to_lowercase()) {
-            return Err("The portable ZIP contains duplicate paths.".into());
-        }
-        let target = destination.join(&relative);
-        entries.push(relative.clone());
-        if entry.is_dir() {
-            std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-            continue;
-        }
-        total = total.checked_add(entry.size()).filter(|size| *size <= MAX_BYTES).ok_or("The portable ZIP is too large.")?;
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&target).map_err(|e| e.to_string())?;
-        use std::io::Read;
-        let declared = entry.size();
-        let copied = std::io::copy(&mut (&mut entry).take(declared.saturating_add(1)), &mut output).map_err(|e| e.to_string())?;
-        if copied != declared {
-            return Err("The portable ZIP has an unexpected unpacked size.".into());
-        }
-        files.push(relative);
-    }
-    Ok((files, entries))
-}
-
 fn recorded_files<'a>(app: &CraftApp, record: &'a Record) -> Result<(&'a Path, Vec<PathBuf>), String> {
     let root = record.path.parent().ok_or("The portable installation has no parent folder.")?;
     if record.kind != PackageKind::PortableZip || root.file_name().is_none_or(|n| n != app.id) {
@@ -225,7 +181,7 @@ pub fn install(
     let staging = Staging(staging);
     let unpacked = staging.0.join("unpacked");
     std::fs::create_dir(&unpacked).map_err(|e| e.to_string())?;
-    let (files, entries) = extract(file, &unpacked)?;
+    let (files, entries) = extract(file, &unpacked, WHAT)?;
     // Accept both a flat layout (files at the ZIP root) and a single wrapper-folder layout,
     // but never arbitrary nesting.
     let (unpacked, files) = flatten_zip_layout(app, &unpacked, files, &entries)?;
@@ -389,7 +345,7 @@ fn replace_with(
     let unpacked = staging.join("unpacked");
     let backup = staging.join("backup");
     std::fs::create_dir_all(&unpacked).map_err(|e| e.to_string())?;
-    let (files, _) = extract(zip, &unpacked)?;
+    let (files, _) = extract(zip, &unpacked, WHAT)?;
     let top = single_top_folder(&files);
     let files = files
         .into_iter()
@@ -474,7 +430,7 @@ fn single_top_folder(files: &[PathBuf]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use crate::zip_archive::test_zip::archive;
 
     /// A folder on a network share is the same folder after `canonicalize`.
     #[cfg(windows)]
@@ -529,21 +485,6 @@ mod tests {
         assert_eq!(std::fs::read(&exe).unwrap(), b"old launcher");
         assert!(!folder.join("README.md").exists());
         assert!(!staging.exists());
-    }
-
-    fn archive(root: &Path, name: &str, files: &[(&str, &[u8])]) -> PathBuf {
-        let path = root.join(name);
-        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
-        for (name, content) in files {
-            if name.ends_with('/') {
-                zip.add_directory(*name, zip::write::SimpleFileOptions::default()).unwrap();
-            } else {
-                zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
-                zip.write_all(content).unwrap();
-            }
-        }
-        zip.finish().unwrap();
-        path
     }
 
     #[test]
@@ -848,7 +789,7 @@ mod tests {
             let zip = archive(dir.path(), name, &files);
             let output = dir.path().join(name.replace('.', "-"));
             std::fs::create_dir(&output).unwrap();
-            assert!(extract(&zip, &output).is_err(), "{name}");
+            assert!(extract(&zip, &output, WHAT).is_err(), "{name}");
         }
         assert!(!dir.path().join("escape.exe").exists());
         assert!(validate_directory(Path::new("relative/folder")).is_err());

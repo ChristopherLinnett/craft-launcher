@@ -9,11 +9,11 @@ use artcraft_launcher_core::catalog::{LAUNCHER, LAUNCHER_ID};
 use artcraft_launcher_core::feed::{Feed, FeedAnswer};
 use artcraft_launcher_core::platform::{Arch, Os, Platform, pick_asset};
 use artcraft_launcher_core::protocol::{
-    Backend, BackendOptions, CANCELLED, Capabilities, Command, Event, INSTALL_CANCELLED, JobPhase, LatestRelease, Origin, PAUSED, PausedDownload,
-    Source,
+    Backend, BackendOptions, CANCELLED, CONNECTION_DROPPED, Capabilities, Command, Event, INSTALL_CANCELLED, JobPhase, LatestRelease, Origin, PAUSED,
+    PausedDownload, Source,
 };
 use artcraft_launcher_core::release::{Asset, Release};
-use artcraft_launcher_core::{CraftApp, Installed, PackageKind, SUITE, version};
+use artcraft_launcher_core::{CraftApp, Installed, PackageKind, SUITE, status, version};
 
 use crate::feed_throttle::{self, FeedThrottle, Outcome};
 use crate::http::{self, Http, Stop};
@@ -337,7 +337,7 @@ impl NativeBackend {
                         if m.apps.remove(app.id).is_some() {
                             let _ = m.save(&paths.manifest());
                         }
-                        format!("{} was removed", app.name)
+                        status::removed_message(app)
                     }),
                     None => Err(format!("{} isn't installed", app.name)),
                 }
@@ -356,9 +356,7 @@ impl NativeBackend {
                 );
                 // Stopped by the connection rather than by the user: say so, and how to go on.
                 match r {
-                    Err(e) if e == PAUSED && stop.check().is_ok() => {
-                        Err("The download paused because the connection keeps dropping. Press Resume to continue where it stopped.".into())
-                    }
+                    Err(e) if e == PAUSED && stop.check().is_ok() => Err(CONNECTION_DROPPED.into()),
                     other => other,
                 }
             };
@@ -373,7 +371,7 @@ impl NativeBackend {
                     if !uninstall && release.version.as_ref().is_some_and(|v| landed_despite(&e, existing.as_ref(), found.as_ref(), v)) =>
                 {
                     log::warn!("{}: {e}; the new version is installed all the same", app.id);
-                    Ok(installed_text(app, existing.is_some(), &release))
+                    Ok(status::installed_message(app, existing.is_some(), &release))
                 }
                 (result, _) => result,
             };
@@ -526,15 +524,10 @@ fn run_install(
             log::warn!("couldn't save the install record: {e}");
         }
     }
-    Ok(installed_text(app, existing.is_some(), &release))
+    Ok(status::installed_message(app, existing.is_some(), &release))
 }
 
 /// What a finished install tells the user.
-fn installed_text(app: &CraftApp, update: bool, release: &Release) -> String {
-    let verb = if update { "updated to" } else { "installed:" };
-    format!("{} {verb} {}", app.name, release.version_label())
-}
-
 /// Whether an install whose job failed with `error` went in all the same. Only a failed call
 /// shared by several apps (Linux packages installed together) can have installed some of them;
 /// any other error, a cancellation or a pause stands, whatever is found afterwards.

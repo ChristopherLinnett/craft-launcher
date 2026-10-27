@@ -2,7 +2,20 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::CraftApp;
+use crate::release::Release;
 use crate::version::{self, Version};
+
+/// What a finished install or update says: `PhotoCraft updated to 0.6.0`.
+pub fn installed_message(app: &CraftApp, update: bool, release: &Release) -> String {
+    let verb = if update { "updated to" } else { "installed:" };
+    format!("{} {verb} {}", app.name, release.version_label())
+}
+
+/// What a finished removal says.
+pub fn removed_message(app: &CraftApp) -> String {
+    format!("{} was removed", app.name)
+}
 
 /// How an installed copy got onto the machine, which decides how to update and remove it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

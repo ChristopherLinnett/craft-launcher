@@ -95,7 +95,7 @@ pub enum LatestRelease {
 }
 
 /// What a running job is doing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobPhase {
     Downloading {
         done: u64,
@@ -115,7 +115,7 @@ pub enum JobPhase {
 }
 
 /// A partly downloaded file waiting to be resumed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PausedDownload {
     pub done: u64,
     /// 0 when unknown.
@@ -124,6 +124,9 @@ pub struct PausedDownload {
 
 /// The `JobFinished` error a paused job ends with (not a failure).
 pub const PAUSED: &str = "paused";
+/// What a job ends with when its download paused because the connection kept dropping, not
+/// because the user paused it.
+pub const CONNECTION_DROPPED: &str = "The download paused because the connection keeps dropping. Press Resume to continue where it stopped.";
 /// The `JobFinished` error a cancelled job ends with (not a failure).
 pub const CANCELLED: &str = "cancelled";
 /// The `JobFinished` error of an install whose system prompt (password, Windows Installer) the
@@ -243,7 +246,8 @@ pub enum Event {
 pub struct Capabilities {
     /// Install, update, remove and launch apps (desktop). Without it the UI offers downloads.
     pub manage_apps: bool,
-    /// What "show in file manager" is called here (`Show in Finder`).
+    /// What "show in file manager" is called here (`Show in Finder`); empty where there's no
+    /// file manager to show apps in, which hides the item.
     pub reveal_label: &'static str,
     /// The launcher can update itself in place and restart (an installed build, not a dev build or
     /// a Flatpak from anywhere but the release bundle). Without it the UI offers the download
@@ -262,6 +266,12 @@ pub trait Backend {
     fn platform(&self) -> Option<Platform>;
     /// Unix seconds now.
     fn now(&self) -> i64;
+    /// Whether the UI may start installs nobody clicked (automatic updates). `false` where the
+    /// installed apps are shared, as on a hosted launcher's server: one person's settings must
+    /// not update everyone's apps.
+    fn unattended_installs(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
